@@ -41,48 +41,53 @@ graph TD
 
 ## 2. Ingesta de Señal y Edge Analysis
 
-### Detección de Virtual Cameras y Virtual Audio Cables
-La detección se basa en la discrepancia de capacidades de hardware y firmas de drivers expuestas vía WebRTC y APIs de enumeración:
+### Estructura de Datos de Telemetría (Wasm Binary Format):
+```rust
+struct SignalMetadata {
+    device_id_hash: u64,
+    jitter_buffer_ms: f32,
+    frame_delta_variance: f32,
+    entropy_score: f32, // Ruido térmico del sensor
+    initialization_latency_ms: u16,
+    flags: u8, // [bit 0: VirtualCam, bit 1: VirtualAudio, bit 2: FocusLoss]
+}
+```
 
-1.  **RTCStatsReport Analysis:**
-    -   **Jitter Buffer Fluctuation:** Los drivers virtuales (OBS-VirtualCam, VB-Audio) presentan patrones de jitter extremadamente bajos o artificialmente constantes, a diferencia del hardware físico que muestra ruido térmico y variaciones micro-temporales.
-    -   **TotalSamplesDuration vs. Timestamp:** Desfases sistemáticos entre el `timestamp` del bloque de datos y la duración real de las muestras procesadas, indicando un pipeline de emulación/buffer intermedio.
+### Detección de Virtual Cameras y Virtual Audio Cables:
+1.  **Análisis de Jitter y Micro-variaciones (RTCStatsReport):**
+    -   **Algoritmo:** Cálculo de la varianza del `googJitterReceived`. El hardware real sigue una distribución de Poisson debido al ruido de cuantización y latencia de bus PCIe/USB. Drivers virtuales muestran varianza $\sigma^2 \approx 0$.
+    -   **TotalSamplesDuration:** Verificación del ratio $R = \frac{\Delta Timestamp}{\Delta Samples}$. Desviaciones $> 1\%$ indican inyección de buffers pre-grabados o síntesis en tiempo real.
 
 2.  **Hardware Fingerprinting:**
-    -   **MediaDevices Enumeration:** Monitoreo de `label` y `groupId`. Bloqueo de IDs que contienen strings conocidos (e.g., "Virtual", "CABLE", "Line 1", "OBS").
-    -   **Device Capabilities Check:** Uso de `getSettings()` para verificar `frameRate` y `aspectRatio`. Las cámaras virtuales suelen fallar al reportar valores de exposición (exposureMode) o enfoque (focusMode) que el hardware real sí expone.
-
-3.  **Wasm-side Heuristics:**
-    -   Análisis de la latencia de inicialización del `MediaStreamTrack`. Los dispositivos virtuales responden significativamente más rápido (< 10ms) que el calentamiento físico de un sensor CMOS (50-200ms).
+    -   **Device Capabilities:** Consulta de `MediaTrackCapabilities`. Bloqueo si `exposureMode` o `whiteBalanceMode` no están presentes (ausentes en el 95% de drivers virtuales).
+    -   **Latencia de Calentamiento:** Se mide el tiempo desde `track.start()` hasta el primer evento `onloadedmetadata`. $T_{virtual} < 15ms$ vs $T_{physical} \in [80, 250]ms$.
 
 ## 3. Análisis de Latencia Cognitiva (TTFR)
 
-El microservicio de Behavioral Biometrics evalúa la probabilidad de asistencia externa analizando el **Time to First Response (TTFR)** en relación con la **Complejidad Semántica (SC)**.
+### Modelo Matemático de Probabilidad:
+Se define la probabilidad de asistencia $P(A|T, SC)$ mediante una distribución Bayesiana donde $T$ es el TTFR y $SC$ la Complejidad Semántica.
 
-### Algoritmo de Probabilidad de Respuesta:
-1.  **Semantic Complexity Extraction:**
-    -   Se procesa el audio de la pregunta del entrevistador vía Whisper-v3 (local inference).
-    -   Se calcula un score de complejidad SC basado en: profundidad del árbol sintáctico, densidad de entidades técnicas y abstracción del prompt.
-2.  **Expected Human Response Model (EHRM):**
-    -   Base de datos de referencia que modela el tiempo de reacción humano promedio ($T_{base}$) para diferentes niveles de SC.
-    -   $\mu_{expected} = T_{base} + \text{log}(SC) \times K$ (donde $K$ es la constante de latencia verbal).
-3.  **TTFR Measurement:**
-    -   Se mide el intervalo entre el fin del audio de la pregunta y el inicio de la modulación vocal del candidato ($VAD_{start}$).
-    -   **Detección de Anomalía:** Si $TTFR < \mu_{expected} - 2\sigma$ (respuesta demasiado rápida para una pregunta compleja) o $TTFR > \mu_{expected} + \Delta_{LLM}$ (donde $\Delta_{LLM}$ es el overhead de procesamiento típico de GPT-4o), se incrementa el score de sospecha.
+1.  **Semantic Complexity (SC):**
+    -   Extracción de grafos de dependencia sintáctica (SpaCy/En_Core_Web_Trf).
+    -   $SC = \alpha \cdot Depth(Tree) + \beta \cdot \text{NodeCount} + \gamma \cdot \text{TechnicalTermsDensity}$.
+2.  **TTFR Measurement (VAD Integration):**
+    -   Uso de **Silero VAD** para detectar con precisión de 30ms el fin de la pregunta ($t_{end\_q}$) y el inicio de la respuesta ($t_{start\_r}$).
+    -   $TTFR = t_{start\_r} - t_{end\_q}$.
+3.  **Detección de LLM Proxy:**
+    -   Anomalía Tipo A (Too Fast): $TTFR < 400ms$ para $SC > 0.7$ (indica pre-procesamiento de texto o script).
+    -   Anomalía Tipo B (LLM Jitter): $TTFR \in [\bar{T}_{LLM} - \epsilon, \bar{T}_{LLM} + \epsilon]$ donde $\bar{T}_{LLM}$ es la latencia media de inferencia de GPT-4o + TTS (aprox. 1.2s - 2.5s).
 
 ## 4. Procesamiento de Audio: Stutter & Echo Analysis
 
-La inyección de audio vía Text-to-Speech (TTS) se detecta mediante el análisis de micro-anomalías en el dominio de la frecuencia y el tiempo.
-
-### Firma Espectral y Micro-pausas:
-1.  **Robotic Micro-stuttering:**
-    -   Los motores TTS de baja latencia suelen generar artefactos de "jitter de síntesis" donde los fonemas se encadenan con una regularidad matemática antinatural.
-    -   Se aplica una **STFT (Short-Time Fourier Transform)** para detectar la ausencia de variaciones de tono fundamentales ($f_0$) que son inherentes a la laringe humana (micro-vibraciones inestables).
-2.  **Acoustic Fingerprinting:**
-    -   **Noise Floor Analysis:** Las voces humanas tienen un ruido de fondo (respiración, ambiente) que desaparece o cambia abruptamente cuando se inyecta un stream digital puro.
-    -   **Echo Cancellation (AEC) Artefacts:** Si el audio inyectado no pasa por el espacio físico, los algoritmos de AEC del navegador no detectarán el "leakage" esperado de la salida de audio hacia el micrófono, resultando en un `residualEchoLevel` inusualmente nulo en los `RTCStats`.
-3.  **Pause Distribution:**
-    -   Análisis de la distribución de pausas entre palabras. El habla humana sigue una distribución log-normal. El TTS tiende a ser lineal o rítmicamente perfecto.
+### Análisis Espectral SIMD-Optimized (C++20):
+1.  **Algoritmo FFT:**
+    -   Implementación de Radix-4 FFT utilizando instrucciones **AVX-512**.
+    -   Cálculo de la **Frecuencia Fundamental ($f_0$)** y sus armónicos. La voz humana presenta una inestabilidad natural (jitter y shimmer). Un TTS muestra una estabilidad de $f_0$ con varianza $< 0.1\%$.
+2.  **Detección de Pausas Artificiales:**
+    -   **Micro-pausas:** El TTS inserta silencios digitales (amplitud $= 0$ absoluta). El habla humana mantiene un ruido base (noise floor) de al menos $-60dB$ incluso en silencio.
+    -   **Algoritmo:** Comparación de la entropía de la señal en ventanas de 20ms. $H(s) = -\sum p_i \log p_i$. Si $H(s) < \text{threshold}$ durante pausas entre fonemas, se marca como inyección digital.
+3.  **AEC Validation:**
+    -   Extracción de `residualEchoLevel` de `RTCRemoteInboundRtpStreamStats`. Si `totalRoundTripTime` es consistente pero el eco residual es inexistente durante la reproducción de audio del entrevistador, existe un bypass de hardware de audio (Virtual Cable).
 
 ## 5. Detección de Pantalla y Overlays
 
@@ -101,15 +106,29 @@ Identificamos herramientas de asistencia visual (e.g., ChatGPT overlays) mediant
 
 ## 6. Data Flow y Deep Packet Inspection (DPI)
 
-El flujo de paquetes RTP/RTCP se analiza en tiempo real para detectar exfiltración de datos hacia motores de IA.
+### Estructura de Mapas eBPF (Kernel Space):
+```c
+struct connection_key {
+    __u32 src_ip;
+    __u32 dst_ip;
+    __u16 dst_port;
+};
 
-### Ruta del Paquete y Puntos de Inspección:
-1.  **Ingress (SFU):** Los paquetes RTP llegan desde el Edge. El SFU desencapsula el header para leer el `SequenceNumber` y `Timestamp`.
-2.  **DPI Layer (eBPF/Kernel side):**
-    -   Se implementa un hook de **eBPF** en el nodo de red para monitorear conexiones salientes simultáneas desde la IP del cliente.
-    -   **Pattern Matching:** Se buscan firmas de tráfico TLS (Server Name Indication - SNI) dirigidas a dominios como `api.openai.com`, `anthropic.com` o `proxy` de telemetría conocidos.
-    -   **Traffic Volumetry:** Si se detecta un pico de tráfico *outbound* (subida de texto/frames) seguido inmediatamente por un pico *inbound* (bajada de respuesta) durante el periodo de silencio del candidato, se marca como sospecha alta.
-3.  **Encapsulación de Metadatos:** Los hallazgos del DPI se inyectan como extensiones de header RTP personalizadas (Header Extensions) para que el Inference Engine final tenga el contexto de red del paquete.
+struct traffic_stats {
+    __u64 bytes_out;
+    __u64 bytes_in;
+    __u64 last_timestamp;
+};
+
+BPF_HASH(candidate_outbound_traffic, struct connection_key, struct traffic_stats);
+```
+
+### Lógica de Deep Packet Inspection:
+1.  **SNI Interception:** Captura del handshake TLS. Si el campo `Server Name Indication` coincide con la lista negra de endpoints de IA (`*.openai.com`, `*.anthropic.com`, `*.perplexity.ai`), se emite una alerta inmediata (`SIG_AI_TRAFFIC`).
+2.  **Correlación Temporal:**
+    -   Punto de inspección en `TC_INGRESS/EGRESS`.
+    -   Si el flujo RTP de video/audio del SFU muestra una pausa (VAD silenciado) mientras el mapa eBPF registra un pico de tráfico TLS saliente $> 15KB/s$ hacia una IP no reconocida, se infiere captura de pantalla/audio por proceso secundario.
+3.  **RTP Header Extensions:** El SFU inyecta metadatos del estado de red en el header RTP (RFC 5285) para sincronizar eventos de red con la inferencia de biometría.
 
 ## 7. Tech Stack y Escalabilidad
 
