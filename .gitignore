@@ -1,0 +1,7 @@
+**/target/
+**/_build/
+**/deps/
+**/node_modules/
+.elixir_ls/
+*.log
+.wasm-pack/

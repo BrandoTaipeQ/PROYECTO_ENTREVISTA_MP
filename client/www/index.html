@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>AI Assistance Detection MVP</title>
+    <style>
+        body { font-family: sans-serif; background: #121212; color: #eee; padding: 20px; }
+        #status { padding: 10px; border-radius: 4px; margin-bottom: 10px; }
+        .safe { background: #1b5e20; }
+        .suspicious { background: #b71c1c; }
+        .warning { background: #e65100; }
+        video { width: 320px; border: 1px solid #444; }
+        pre { background: #1e1e1e; padding: 10px; border-radius: 4px; overflow-x: auto; }
+    </style>
+</head>
+<body>
+    <h1>AI Assistance Detection</h1>
+    <div id="status">System Initializing...</div>
+    <video id="localVideo" autoplay playsinline></video>
+
+    <h3>Detection Logs</h3>
+    <div id="logs"></div>
+
+    <h3>Wasm Integration Status</h3>
+    <pre id="wasm-status">Waiting for wasm-pack build...</pre>
+
+    <script type="module">
+        // --- WASM LOADING SIMULATION ---
+        // In a real build, you would do:
+        // import init, { AIDetector } from '../pkg/ai_detection_client.js';
+
+        async function run() {
+            const wasmStatus = document.getElementById('wasm-status');
+
+            try {
+                // await init(); // Initialize the Wasm module
+                wasmStatus.innerText = "Wasm Module Logic Loaded (Ready to be invoked from pkg/)";
+
+                const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+                document.getElementById('localVideo').srcObject = stream;
+
+                const status = document.getElementById('status');
+                status.innerText = "Monitoring Active";
+                status.className = "safe";
+
+                const videoTrack = stream.getVideoTracks()[0];
+
+                // Real usage:
+                // const detector = new AIDetector();
+                // const result = detector.analyze_capabilities(videoTrack);
+                // processResult(result);
+
+                // Simulation for demonstration:
+                simulateDetection(videoTrack);
+            } catch (e) {
+                document.getElementById('status').innerText = "Error: " + e.message;
+                document.getElementById('status').className = "suspicious";
+            }
+        }
+
+        function simulateDetection(track) {
+            const caps = track.getCapabilities ? track.getCapabilities() : {};
+            const hardwareProps = ["exposureMode", "whiteBalanceMode", "focusMode"];
+            const missing = hardwareProps.filter(p => !(p in caps));
+
+            if (missing.length >= 2) {
+                reportSuspicion("Virtual Camera Signature Detected", 0.85, missing);
+            }
+        }
+
+        function reportSuspicion(reason, score, details) {
+            const status = document.getElementById('status');
+            status.innerText = "ALERTA: " + reason;
+            status.className = "suspicious";
+
+            const logEntry = document.createElement('div');
+            logEntry.style.borderBottom = "1px solid #333";
+            logEntry.style.padding = "5px";
+            logEntry.innerHTML = `<strong>[${new Date().toLocaleTimeString()}]</strong> ${reason} <br>
+                                 Confidence: ${(score * 100).toFixed(1)}% | Details: ${details.join(', ')}`;
+            document.getElementById('logs').prepend(logEntry);
+        }
+
+        run();
+    </script>
+</body>
+</html>
