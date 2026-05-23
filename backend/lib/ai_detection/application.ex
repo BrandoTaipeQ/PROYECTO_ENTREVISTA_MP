@@ -6,6 +6,8 @@ defmodule AIDetection.Application do
       # Start the telemetry supervisor
       # Start the PubSub system
       {Phoenix.PubSub, name: AIDetection.PubSub},
+      # Start the Bot Manager
+      AIDetection.Bot.Manager,
       # Start the endpoint when the application starts
       AIDetectionWeb.Endpoint
     ]
